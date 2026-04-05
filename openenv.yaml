@@ -1,0 +1,73 @@
+name: sql-fixer-env
+version: "0.1.0"
+description: An OpenEnv environment for fixing broken SQL queries against a SQLite database.
+author: ClonerBluff
+tasks:
+  - id: easy
+    name: "Syntax Error Fixer"
+    description: "Fix SQL queries with syntax errors (typos, missing keywords)"
+    difficulty: easy
+    max_steps: 1
+    reward_threshold: 0.5
+  - id: medium
+    name: "Logic Error Fixer"
+    description: "Fix SQL queries with logical errors (wrong conditions, wrong aggregations)"
+    difficulty: medium
+    max_steps: 1
+    reward_threshold: 0.7
+  - id: hard
+    name: "Structural Query Rewriter"
+    description: "Fix SQL queries with structural errors (wrong JOINs, subquery bugs)"
+    difficulty: hard
+    max_steps: 1
+    reward_threshold: 1.0
+action_space:
+  type: object
+  properties:
+    broken_sql:
+      type: string
+      description: The broken SQL query shown to the agent
+    fixed_sql:
+      type: string
+      description: The agent's corrected SQL query
+    task_id:
+      type: string
+      description: The task identifier
+observation_space:
+  type: object
+  properties:
+    task_id:
+      type: string
+      description: Current task identifier
+    difficulty:
+      type: string
+      description: Difficulty level (easy, medium, hard)
+    db_schema:
+      type: string
+      description: Full CREATE TABLE statements
+    broken_sql:
+      type: string
+      description: The broken SQL query to fix
+    error_message:
+      type: string
+      description: Error from running the broken query
+    expected_output_hint:
+      type: string
+      description: Hint about expected output
+    result:
+      type: string
+      description: Result from running the fixed query
+    reward:
+      type: number
+      description: Score for this step (0.0 to 1.0)
+    done:
+      type: boolean
+      description: Whether the episode is done
+    success:
+      type: boolean
+      description: Whether the fix was successful
+    feedback:
+      type: string
+      description: Human-readable feedback
+reward_range: [0.0, 1.0]
+entry_point: server.app:app
