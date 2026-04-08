@@ -22,5 +22,5 @@ tasks:
     description: "Fix SQL queries with structural errors (wrong JOINs, subquery bugs)"
     grader: server.tasks:TaskGrader
 
-reward_range: [0.0, 1.0]
+reward_range: [0.05, 0.95]
 entry_point: server.app:app

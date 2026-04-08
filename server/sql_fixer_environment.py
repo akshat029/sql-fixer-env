@@ -102,7 +102,7 @@ class SQLFixerEnvironment(Environment):
             result=result,
             reward=reward,
             done=True,
-            success=reward > 0.0,
+            success=reward > 0.5,
             feedback=feedback,
         )
 

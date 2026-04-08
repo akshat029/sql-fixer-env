@@ -161,62 +161,58 @@ class TaskGrader:
     """Grade a fixed SQL query against the expected correct query."""
 
     def grade(self, fixed_sql: str, conn: sqlite3.Connection, task: Task) -> Tuple[float, str]:
-        # NOTE: scores must be strictly between 0 and 1 (never 0.0 or 1.0)
+        """Grade and clamp score to strictly within (0, 1)."""
+        raw_score, feedback = self._compute_raw_score(fixed_sql, conn, task)
+        # Clamp to open interval (0, 1) — hackathon requires strictly between 0 and 1
+        clamped = max(0.05, min(0.95, raw_score))
+        return clamped, feedback
+
+    def _compute_raw_score(self, fixed_sql: str, conn: sqlite3.Connection, task: Task) -> Tuple[float, str]:
         if not fixed_sql or not fixed_sql.strip():
-            return 0.05, "No SQL provided"
+            return 0.0, "No SQL provided"
 
         fixed_sql = fixed_sql.strip()
         actual_rows, error = execute_query(conn, fixed_sql)
         if error:
-            return 0.05, f"SQL error: {error}"
+            return 0.0, f"SQL error: {error}"
 
         expected_rows, exp_error = execute_query(conn, task.correct_sql)
         if exp_error:
-            return 0.05, f"Internal error running expected SQL: {exp_error}"
+            return 0.0, f"Internal error running expected SQL: {exp_error}"
 
         # ── Easy: just needs to execute and return rows ─────────────────
         if task.difficulty == "easy":
             if actual_rows:
-                score, feedback = 0.95, "Query executed and returned rows"
+                return 1.0, "Query executed and returned rows"
             else:
-                score, feedback = 0.5, "Query executed but returned no rows"
+                return 0.5, "Query executed but returned no rows"
 
         # ── Medium: compare result sets ─────────────────────────────────
         elif task.difficulty == "medium":
             if actual_rows == expected_rows:
-                score, feedback = 0.95, "Exact match"
-            else:
-                actual_set = set(tuple(row.items()) for row in actual_rows)
-                expected_set = set(tuple(row.items()) for row in expected_rows)
-                if actual_set == expected_set:
-                    score, feedback = 0.7, "Same rows, different order"
-                else:
-                    overlap = len(actual_set & expected_set)
-                    if expected_rows and overlap >= len(expected_rows) * 0.5:
-                        score, feedback = 0.3, "At least 50% of expected rows present"
-                    else:
-                        score, feedback = 0.1, "No significant match"
+                return 1.0, "Exact match"
+            actual_set = set(tuple(row.items()) for row in actual_rows)
+            expected_set = set(tuple(row.items()) for row in expected_rows)
+            if actual_set == expected_set:
+                return 0.7, "Same rows, different order"
+            overlap = len(actual_set & expected_set)
+            if expected_rows and overlap >= len(expected_rows) * 0.5:
+                return 0.3, "At least 50% of expected rows present"
+            return 0.0, "No significant match"
 
         # ── Hard: compare with column-order tolerance ───────────────────
         elif task.difficulty == "hard":
             if actual_rows == expected_rows:
-                score, feedback = 0.95, "Exact match"
-            else:
-                actual_set = set(tuple(sorted(row.items())) for row in actual_rows)
-                expected_set = set(tuple(sorted(row.items())) for row in expected_rows)
-                if actual_set == expected_set:
-                    score, feedback = 0.8, "Same rows, different column order"
-                else:
-                    overlap = len(actual_set & expected_set)
-                    if expected_rows and overlap >= len(expected_rows) * 0.5:
-                        score, feedback = 0.5, "At least 50% rows correct"
-                    elif actual_rows:
-                        score, feedback = 0.15, "Query executed but results don't match"
-                    else:
-                        score, feedback = 0.05, "No results"
-        else:
-            score, feedback = 0.05, "Unknown difficulty"
+                return 1.0, "Exact match"
+            actual_set = set(tuple(sorted(row.items())) for row in actual_rows)
+            expected_set = set(tuple(sorted(row.items())) for row in expected_rows)
+            if actual_set == expected_set:
+                return 0.8, "Same rows, different column order"
+            overlap = len(actual_set & expected_set)
+            if expected_rows and overlap >= len(expected_rows) * 0.5:
+                return 0.5, "At least 50% rows correct"
+            if actual_rows:
+                return 0.1, "Query executed but results don't match"
+            return 0.0, "No results"
 
-        # ── Safety clamp: scores must be strictly within (0, 1) ─────────
-        score = max(0.01, min(0.99, score))
-        return score, feedback
+        return 0.0, "Unknown difficulty"
