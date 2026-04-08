@@ -53,7 +53,7 @@ class SQLFixerEnvironment(Environment):
             error_message=error_message,
             expected_output_hint=self._current_task.expected_output_hint,
             result="",
-            reward=0.0,
+            reward=None,
             done=False,
             success=False,
             feedback="Episode started. Fix the broken SQL query.",

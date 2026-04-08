@@ -52,15 +52,15 @@ Data analysts and developers frequently encounter broken SQL queries. This envir
 
 ### Easy — Syntax Error Fixer
 Fix queries with simple syntax errors: typos in keywords, missing commas, wrong table names.
-**Grading**: 1.0 if executes and returns rows · 0.5 if executes but empty · 0.0 if fails.
+**Grading**: 0.95 if executes and returns rows · 0.5 if executes but empty · 0.05 if fails.
 
 ### Medium — Logic Error Fixer
 Fix queries with logical errors: wrong WHERE conditions, missing GROUP BY, wrong aggregations.
-**Grading**: 1.0 exact match · 0.7 same rows different order · 0.3 ≥50% expected rows · 0.0 otherwise.
+**Grading**: 0.95 exact match · 0.7 same rows different order · 0.3 ≥50% expected rows · 0.1 otherwise.
 
 ### Hard — Structural Query Rewriter
 Fix queries with structural errors: wrong JOINs, subquery bugs, missing HAVING.
-**Grading**: 1.0 exact match · 0.8 same rows different columns · 0.5 ≥50% rows · 0.1 executes but not useful · 0.0 fails.
+**Grading**: 0.95 exact match · 0.8 same rows different columns · 0.5 ≥50% rows · 0.15 executes but not useful · 0.05 fails.
 
 ## Setup Instructions
 
