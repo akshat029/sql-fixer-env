@@ -66,6 +66,25 @@ class SQLFixerEnvironment(Environment):
         **kwargs: Any,
     ) -> SQLFixerObservation:
         """Step: grade the agent's fixed SQL query."""
+        # Auto-initialize if step is called on a fresh instance (HTTP mode)
+        if self._conn is None or self._current_task is None:
+            self._conn = create_database()
+            # Find the task by task_id from the action
+            found = False
+            for diff, tasks in all_tasks.items():
+                for t in tasks:
+                    if t.task_id == action.task_id:
+                        self._current_task = t
+                        self._current_difficulty = diff
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                # Fallback: pick first easy task
+                self._current_difficulty = "easy"
+                self._current_task = all_tasks["easy"][0]
+
         rows, error = execute_query(self._conn, action.fixed_sql)
         reward, feedback = self._task_grader.grade(
             action.fixed_sql, self._conn, self._current_task
