@@ -1,37 +1,72 @@
 """
 SQL Fixer Environment — Inference Script
-Connects to the OpenEnv server, uses an LLM to fix broken SQL queries,
-and emits structured [START] / [STEP] / [END] logs for evaluation.
+=========================================
+MANDATORY
+- Before submitting, ensure the following variables are defined in your environment configuration:
+    API_BASE_URL   The API endpoint for the LLM.
+    MODEL_NAME     The model identifier to use for inference.
+    HF_TOKEN       Your Hugging Face / API key.
+
+STDOUT FORMAT
+- The script emits exactly three line types to stdout, in this order:
+
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
+
+  Each task (easy, medium, hard) gets its own [START]...[END] block.
+  Scores are strictly in (0, 1).
 """
 
 import os
 import sys
-import json
 import time
-import datetime
 import subprocess
-import signal
 import atexit
+from typing import List, Optional
 
 from openai import OpenAI
 
 # ── Environment variables (mandatory per hackathon spec) ─────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
-# tried using gpt-4o here first but switched to llama for free tier
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY", "")
 
 # Where the environment server is running
 ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
 
+BENCHMARK = "sql-fixer-env"
+EPISODES_PER_TASK = 3
+MAX_STEPS = 1  # Each episode is a single step: submit the fixed SQL
+SUCCESS_THRESHOLD = 0.5
+
+
+# ── Structured log helpers (flat key=value format) ───────────────────────────
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    # Sanitize action string: remove newlines, limit length
+    action_clean = action.replace("\n", " ").replace("\r", "")[:200]
+    print(
+        f"[STEP] step={step} action={action_clean} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
-def log(marker: str, data: dict):
-    """Print a structured log line: [START|STEP|END] {json}"""
-    data["timestamp"] = datetime.datetime.utcnow().isoformat() + "Z"
-    print(f"{marker} {json.dumps(data)}")
-    sys.stdout.flush()
-
 
 def clean_sql(text: str) -> str:
     """Strip markdown fences and whitespace from LLM output."""
@@ -45,6 +80,11 @@ def clean_sql(text: str) -> str:
     return text.strip()
 
 
+def clamp_score(score: float) -> float:
+    """Clamp score to strictly within (0, 1) — never exactly 0 or 1."""
+    return max(0.05, min(0.95, score))
+
+
 # ── Main inference logic ─────────────────────────────────────────────────────
 
 def run_inference():
@@ -54,103 +94,102 @@ def run_inference():
 
     llm = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
-    log("[START]", {
-        "event": "inference_started",
-        "model": MODEL_NAME,
-        "env_url": ENV_URL,
-    })
-
     task_ids = ["easy", "medium", "hard"]
-    episodes_per_task = 3
-    all_results = {}
 
     # Use synchronous client
     with SQLFixerEnv(base_url=ENV_URL).sync() as env:
         for task_id in task_ids:
-            scores = []
-            for ep in range(episodes_per_task):
-                step_start = time.time()
-                try:
-                    # Reset environment for this task
-                    result = env.reset(difficulty=task_id)
-                    obs = result.observation
+            rewards: List[float] = []
+            steps_taken = 0
 
-                    # Build LLM prompt
-                    prompt = (
-                        "You are an expert SQL debugger. You will be given a broken SQL query "
-                        "and must return ONLY the corrected SQL query — no explanation, "
-                        "no markdown, no backticks.\n\n"
-                        f"Database Schema:\n{obs.db_schema}\n\n"
-                        f"Broken SQL Query:\n{obs.broken_sql}\n\n"
-                        f"Error (if any):\n{obs.error_message}\n\n"
-                        f"Hint about expected output:\n{obs.expected_output_hint}\n\n"
-                        "Return ONLY the corrected SQL query:"
-                    )
+            # ── [START] for this task ────────────────────────────────
+            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-                    # Call LLM
-                    response = llm.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=500,
-                        temperature=0.0,
-                    )
-                    fixed_sql = clean_sql(response.choices[0].message.content)
+            try:
+                for ep in range(1, EPISODES_PER_TASK + 1):
+                    try:
+                        # Reset environment for this task
+                        result = env.reset(difficulty=task_id)
+                        obs = result.observation
 
-                    # Submit action
-                    action = SQLFixerAction(
-                        broken_sql=obs.broken_sql,
-                        fixed_sql=fixed_sql,
-                        task_id=obs.task_id,
-                    )
-                    step_result = env.step(action)
-                    reward = step_result.reward if step_result.reward is not None else 0.05
-                    # Clamp to strictly (0, 1) for evaluator compliance
-                    reward = max(0.01, min(0.99, reward))
-                    scores.append(reward)
+                        # Build LLM prompt
+                        prompt = (
+                            "You are an expert SQL debugger. You will be given a broken SQL query "
+                            "and must return ONLY the corrected SQL query — no explanation, "
+                            "no markdown, no backticks.\n\n"
+                            f"Database Schema:\n{obs.db_schema}\n\n"
+                            f"Broken SQL Query:\n{obs.broken_sql}\n\n"
+                            f"Error (if any):\n{obs.error_message}\n\n"
+                            f"Hint about expected output:\n{obs.expected_output_hint}\n\n"
+                            "Return ONLY the corrected SQL query:"
+                        )
 
-                    log("[STEP]", {
-                        "task_id": task_id,
-                        "episode": ep + 1,
-                        "reward": reward,
-                        "done": step_result.done,
-                        "feedback": step_result.observation.feedback,
-                        "duration_s": round(time.time() - step_start, 2),
-                    })
+                        # Call LLM
+                        response = llm.chat.completions.create(
+                            model=MODEL_NAME,
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=500,
+                            temperature=0.0,
+                        )
+                        fixed_sql = clean_sql(response.choices[0].message.content)
 
-                except Exception as e:
-                    scores.append(0.05)
-                    log("[STEP]", {
-                        "task_id": task_id,
-                        "episode": ep + 1,
-                        "reward": 0.05,
-                        "done": True,
-                        "error": str(e),
-                        "duration_s": round(time.time() - step_start, 2),
-                    })
+                        # Submit action
+                        action = SQLFixerAction(
+                            broken_sql=obs.broken_sql,
+                            fixed_sql=fixed_sql,
+                            task_id=obs.task_id,
+                        )
+                        step_result = env.step(action)
+                        reward = step_result.reward if step_result.reward is not None else 0.05
+                        reward = clamp_score(reward)
+                        done = step_result.done if step_result.done is not None else True
 
-            all_results[task_id] = scores
+                        rewards.append(reward)
+                        steps_taken = ep
 
-    # ── Summary ──────────────────────────────────────────────────────────
-    print("\n=== SQL FIXER ENVIRONMENT — INFERENCE RESULTS ===")
-    total_scores = []
-    summary = {}
-    for task_id in task_ids:
-        scores = all_results[task_id]
-        avg = sum(scores) / len(scores) if scores else 0.0
-        summary[task_id] = {"avg_reward": round(avg, 3), "scores": scores}
-        print(f"  Task: {task_id:8s} | Episodes: {len(scores)} | "
-              f"Avg: {avg:.2f} | Min: {min(scores):.1f} | Max: {max(scores):.1f}")
-        total_scores.extend(scores)
+                        log_step(
+                            step=ep,
+                            action=fixed_sql,
+                            reward=reward,
+                            done=done,
+                            error=None,
+                        )
 
-    overall = sum(total_scores) / len(total_scores) if total_scores else 0.0
-    print(f"  Overall Avg Score: {overall:.3f}")
-    print("=" * 50)
+                    except Exception as e:
+                        reward = 0.05
+                        rewards.append(reward)
+                        steps_taken = ep
 
-    log("[END]", {
-        "event": "inference_completed",
-        "overall_avg_reward": round(overall, 3),
-        "task_summary": summary,
-    })
+                        log_step(
+                            step=ep,
+                            action="error",
+                            reward=reward,
+                            done=True,
+                            error=str(e).replace("\n", " ")[:200],
+                        )
+
+                # ── [END] for this task ──────────────────────────────
+                score = sum(rewards) / len(rewards) if rewards else 0.05
+                score = clamp_score(score)
+                success = score >= SUCCESS_THRESHOLD
+
+                log_end(
+                    success=success,
+                    steps=steps_taken,
+                    score=score,
+                    rewards=rewards,
+                )
+
+            except Exception as e:
+                # Ensure [END] is always emitted even on catastrophic failure
+                if not rewards:
+                    rewards = [0.05]
+                log_end(
+                    success=False,
+                    steps=max(steps_taken, 1),
+                    score=0.05,
+                    rewards=rewards,
+                )
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -159,7 +198,7 @@ if __name__ == "__main__":
     # If no ENV_URL is set, start the server locally in the background
     server_proc = None
     if not os.environ.get("ENV_URL"):
-        print("Starting local environment server...")
+        print("Starting local environment server...", flush=True)
         server_proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "server.app:app",
              "--host", "0.0.0.0", "--port", "7860"],
